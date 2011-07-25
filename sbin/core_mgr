@@ -8,7 +8,7 @@ self_base="$(basename "$0")"
 self="$(cd -P "$(dirname "$0")" && /bin/pwd)/$self_base"
 now="$(date +'%Y-%m-%dT%H:%M:%S.%N%:z')"
 tmp="/tmp/$self_base.$$"
-core_dir="/var/run/${self_base}"
+core_dir="/var/log/${self_base}"
 self_installed="$core_dir/$self_base"
 log_file="$core_dir/$self_base.log"
 core_dir_checked="$core_dir/checked"
@@ -32,12 +32,6 @@ email_addr="core-dump@localhost"
 core_mode="pipe"
 cfg_file="$self_installed.cfg"
 [ -f "$cfg_file" ] && . "$cfg_file"
-
-if [ ! -d "$core_dir" ]
-then
-  echo "$self core_dir '$core_dir' does not exist" 1>&2
-  exit 2
-fi
 
 # Note: the expanded core_pattern must be less than CORENAME_MAX_SIZE.
 # CORENAME_MAX_SIZECOREN is set to 128 in linux/binfmts.h
@@ -375,6 +369,16 @@ EOF
 ######################################################################
 
 action="$1"; shift
+
+if [ "$action" != 'help' ]
+then
+  if [ ! -d "$core_dir" ]
+  then
+    echo "$self core_dir '$core_dir' does not exist" 1>&2
+    exit 2
+  fi
+fi
+
 case "$action"
 in
   install|enable*|disable*|cleanup|check|list|clear|fake|test|ulimit|X|help)

@@ -12,7 +12,7 @@
 
 = Solution =
 
-* core_mgr captures the core file and places it in a central location (/var/run/core_mgr by default).
+* core_mgr captures the core file and places it in a central location (/var/log/core_mgr by default).
 * core_mgr logs to a file when a core dump occurs.
 * core_mgr periodically checks for new core files, via cron, and sends email when a new core file is created.
 * core_mgr will not save core files if disk space is low. 
