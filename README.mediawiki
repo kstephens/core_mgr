@@ -1,9 +1,9 @@
 = Problem =
 
 * Programs crash.
-* For most crashes, Linux will write a "core" file.
-* A core file contains the entire state of the program.
-* Core file can be used in a debugger to help determine the cause of the crash.
+* For most crashes, Linux will write a "core dump" file ( http://en.wikipedia.org/wiki/Core_dump )
+* A core dump contains the entire state of the program.
+* A core dump file can be used in a debugger to help determine the cause of the crash.
 * Linux will save a "core" file, by default, in the current directory of the terminating process.
 * It's difficult to determine which program generated a core file because they are named "core", by default.
 * Core files cannot be written if the current directory is not writable by the uid of the process.
@@ -16,7 +16,7 @@
 * core_mgr logs to a file when a core dump occurs.
 * core_mgr periodically checks for new core files, via cron, and sends email when a new core file is created.
 * core_mgr will not save core files if disk space is low. 
-* core_mgr uses the Linux /proc/sys/kernel/core_pattern hook.
+* core_mgr uses the Linux /proc/sys/kernel/core_pattern hook. ( http://linux.die.net/man/5/core )
 
 = Setup =
 
