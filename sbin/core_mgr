@@ -1,0 +1,390 @@
+#!/bin/bash
+# Setup and manage core dumps.
+# Author: Kurt Stephens
+# set -x 
+PATH="/usr/bin:/bin:/sbin"
+errors=0
+self_base="$(basename "$0")"
+self="$(cd -P "$(dirname "$0")" && /bin/pwd)/$self_base"
+now="$(date +'%Y-%m-%dT%H:%M:%S.%N%:z')"
+tmp="/tmp/$self_base.$$"
+core_dir="/var/run/${self_base}"
+self_installed="$core_dir/$self_base"
+log_file="$core_dir/$self_base.log"
+core_dir_checked="$core_dir/checked"
+core_prefix="core-"
+core_suffix=""
+core_file_template="$core_dir/${core_prefix}e=%e,t=%t,h=%h,p=%p,u=%u,g=%g,s=%s$core_suffix"
+core_var_template="$core_file_template"
+core_var_template="${core_var_template/\%e/\$e}"
+core_var_template="${core_var_template/\%t/\$t}"
+core_var_template="${core_var_template/\%h/\$h}"
+core_var_template="${core_var_template/\%p/\$p}"
+core_var_template="${core_var_template/\%u/\$u}"
+core_var_template="${core_var_template/\%g/\$g}"
+core_var_template="${core_var_template/\%s/\$s}"
+core_disable_file="$core_dir/DISABLE-CORE"
+core_dir_disk_space_needed_M=384
+#core_dir_disk_space_needed_M=40000
+cron_file="/etc/cron.d/$self_base"
+email_addr="core-dump@localhost"
+
+core_mode="pipe"
+cfg_file="$self_installed.cfg"
+[ -f "$cfg_file" ] && . "$cfg_file"
+
+if [ ! -d "$core_dir" ]
+then
+  echo "$self core_dir '$core_dir' does not exist" 1>&2
+  exit 2
+fi
+
+# Note: the expanded core_pattern must be less than CORENAME_MAX_SIZE.
+# CORENAME_MAX_SIZECOREN is set to 128 in linux/binfmts.h
+# See fs/exec.c for more details.
+case "$core_mode"
+in
+  pipe)
+    core_pattern="|$self_installed X e=%e t=%t h=%h p=%p u=%u g=%g s=%s"
+  ;;
+  *)
+    core_pattern="$core_file_pattern"
+  ;;
+esac
+
+######################################################################
+
+msg() {
+  echo "$now $self $action $*"
+}
+
+log() {
+  msg "$@" | tee -a "$log_file"
+  chmod 666 "$log_file" 2>/dev/null
+}
+
+locate() {
+  (
+  set -e
+  # cd "$core_dir" to prevent a disaster
+  cd "$core_dir" 
+  # -maxdepth to prevent a disaster
+  find "$core_dir" -maxdepth 3 -name "$core_prefix*$core_suffix" "$@" -print |
+  # grep "$core_dir/" to prevent a disaster
+  grep "$core_dir/"
+  )
+}
+
+check_disk_space() { #
+  # Disables core dumps if disk space is too low in "$core_dir".
+  disk_space_avail_M="$(df --block-size=1M "$core_dir" | tail -1 | awk '{ print $4 }')"
+  if [ "$disk_space_avail_M" -le "$core_dir_disk_space_needed_M" ]
+  then
+    msg "WARNING: core_dir $core_dir only has ${disk_space_avail_M}MB left, need ${core_dir_disk_space_needed_M}MB" >&2
+    _disable_core
+    return 1
+  fi
+  return 0
+}
+
+check_enabled() { #
+  # Returns true if "$core_disable_file" does not exist.
+  [ ! -f "$core_disable_file" ] 
+}
+
+check_disabled() { #
+  # Disables core dumps and returns true if "$core_disable_file" exists.
+  if ! check_enabled
+  then
+    _disable_core_pattern
+    return 0 # disabled
+  fi
+  return 1 # not disabled
+}
+
+send_mail() { # SUBJECT
+  /usr/bin/mail -s "$1" $email_addr
+}
+
+######################################################################
+# action commands
+#
+
+_install() { # KEY=VALUE ...
+  # Installs "$self" into "$self_installed" with configuration settings.
+  echo "# $now $self $action " > "$cfg_file"
+  while [ $# -gt 0 ]
+  do
+    eval "$1"
+    echo "$1" >> "$cfg_file"
+    shift
+  done
+
+  # Alias for enable_cron and enable_core.
+  if [ "$self" != "$self_installed" ]
+  then
+    set -e
+    chmod +w "$self_installed" || true
+    cp "$self" "$self_installed"
+    mkdir -p "$(dirname "$self_installed")"
+    chmod 555 "$self_installed"
+    chown root:root "$self_installed"
+    log "Installed $self_installed"
+    self="$self_installed"
+  fi
+}
+
+_enable() { #
+  # Alias for install, enable_cron, enable_core.
+  _enable_cron
+  _enable_core
+}
+
+_disable() { # [ REASON ]
+  # Alias for disable_cron and disable_core.
+  _disable_cron
+  _disable_core "$@"
+}
+
+_enable_core_pattern() { #
+  # Enables core dumps into "$core_dir" using /proc/sys/kernel/core_pattern.  Must be root.
+  set -e
+  mkdir -p "$core_dir" 
+  bash -c "echo '$core_pattern' > /proc/sys/kernel/core_pattern"
+  log "core_pattern='$core_pattern'"
+}
+
+_disable_core_pattern() { #
+  # Disables core dumps using /proc/sys/kernel/core_pattern.  Must be root.
+  set -e
+  bash -c "echo '' > /proc/sys/kernel/core_pattern"
+  log "core_pattern=''"
+}
+
+_ulimit() { #
+  # Generates a suitable "ulimit -c" command depending on existence of "$core_disable_file".
+  if [ ! -f "$core_disable_file" ]
+  then
+    echo 'ulimit -c unlimited'
+  else
+    echo 'ulimit -c 0'
+  fi
+}
+
+_enable_core() { #
+  # Enable core dumps.
+  set -e
+  if [ -f "$core_disable_file" ]
+  then
+    (
+      echo "$self_base: WARNING: core files were disabled; $core_disable_file exists"
+      cat "$core_disable_file"
+    ) >&2
+    rm -f "$core_disable_file"
+    log "Removed $core_disable_file"
+  fi
+  _enable_core_pattern
+}
+
+_disable_core() { # [ REASON ]
+  # Create "$core_disable_file" and disables core files.
+  set -e
+  if [ ! -f "$core_disable_file" ]
+  then
+    echo "core disabled by $(id -a) $now $*" > "$core_disable_file"
+    chmod 666 "$core_disable_file" 2>/dev/null
+    log "Created $core_disable_file $*"
+  fi
+  _disable_core_pattern
+}
+
+_check() { #
+  # Checks for files under "$core_dir" and moves them to $core_dir_checked.  Checks for "$core_disable_file" and disk space. 
+  mkdir -p "$core_dir_checked/"
+  locate | grep -v "$core_dir_checked/" > "$tmp"
+  if [ -s "$tmp" ]
+  then
+    (
+      echo "$now $self $action $(wc -l < $tmp) CORE FILES FOUND {"
+      xargs -r ls -l1 < "$tmp"
+      echo "}"
+    ) | tee -a "$log_file"
+    chmod 666 "$log_file" 2>/dev/null
+    xargs -r chmod 444 < "$tmp"
+    xargs -r -I@ -n 1 mv @ "$core_dir_checked/" < "$tmp"
+  fi
+  rm "$tmp"
+
+  set -e
+  check_disabled
+  check_disk_space
+}
+
+_list() { #
+  # Lists all core files under "$core_dir".
+  locate | xargs -r ls -1 "$@"
+}
+
+_cleanup() { # [ DAYS ]
+  # Removes core files older than DAYS.  Default to 3 days (for weekends).
+  locate -mtime "${1:-3}" | 
+  grep "$core_dir/" | 
+  xargs -r rm > "$tmp"
+}
+
+_clear() { # 
+  # Remove all core files under "$core_dir".
+  locate | 
+  # grep "$core_dir/" to prevent disaster
+  grep "$core_dir/" | 
+  xargs --verbose -r -n 1 rm
+}
+
+_fake() { #
+  # Simulates a core file.
+  set -x
+  ulimit -c unlimited
+  sleep 10 &
+  pid="$!"
+  kill -11 $pid # 11 = SEGV
+  wait $pid
+  sleep 1
+  locate -name '*cnu-core-mgr*' -name '*sig=11*' | 
+  grep -v "$core_dir_checked/" | 
+  xargs -r ls -l
+}
+
+
+_test() { #
+  # Test that core files are being created.
+  _fake
+  locate -name '*cnu-core-mgr*' -name '*sig=11*' | 
+  xargs -r --verbose rm
+}
+
+_X() { # KEY=VALUE ...
+  # Receive core file from stdin.  Kernel will use "$core_pattern" to send core file to this program.
+  # exec >>"$log_file" 2>&1
+  # set -x
+  local e= t= h= p= u= g= s= args="$*"
+  eval local "$@"
+  eval "core_file=$core_var_template"
+  (
+    msg "$args core_file=$core_file"
+    if check_enabled && check_disk_space
+    then
+      set -e
+      cat - > "$core_file" || rm "$core_file" # out of disk?
+      chmod 444 "$core_file"
+      chown "$u:$g" "$core_file" || true
+      # mv "$core_file" "$core_dir_checked/"
+    else
+      msg "$core_file NOT WRITTEN"
+    fi
+  ) 2>&1 | tee -a "$log_file" | send_mail "$self_base core-dump $core_file"
+  chmod 666 "$log_file" 2>/dev/null
+}
+
+_enable_cron() { # [ MAILTO=addr ]
+  # Installs cron "$cron_file" file.  Must be root.  MAILTO default "${email_addr}".
+  set -e
+  eval "$@"
+  cp /dev/null "$cron_file"
+  cat <<EOF >"$cron_file"
+MAILTO=${MAILTO:-$email_addr}
+# m   h  dom mon dow user  command
+  1   1  *   *   *   root  $self_installed cleanup
+  */5 *  *   *   *   root  $self_installed check
+EOF
+  (
+    msg "Created $cron_file {"
+    cat "$cron_file"
+    echo "}"
+  ) | tee -a "$log_file"
+  chmod 666 "$log_file"
+}
+
+_disable_cron() { #
+  # Uninstalls cron "$cron_file" file.  Must be root.
+  set -e
+  rm -f "$cron_file"
+  log "Removed $cron_file"
+}
+
+_help() { #
+  # This help.
+  (
+  cat <<EOF
+$self_base: Manage core dump files.
+
+SYNOPSIS:
+
+  $self_base COMMAND ARGS ...
+
+COMMANDS:
+EOF
+  egrep -A 1 -r -e "^_[^()]+[()]+[^{]*[{][^#]*#" < "$self" | 
+  grep -e '#' |
+  sed -r -e 's@^_@\n  @' -e 's@[()]+[^{]*[{][^#]*#(.*)@\1\n@' -e 's@ *# *@    @' |
+  eval "$(echo 'cat <<EOF'; cat -; echo 'EOF')" #
+  cat <<EOF
+
+HOW TO:
+
+  INSTALL:
+
+  % sudo mkdir $core_dir
+  % sudo $self install email_addr=core-dump@email.com
+2011-07-20T15:39:22.567453959-05:00 /somedir/core_mgr/sbin/core_mgr install Installed $core_dir/core_mgr
+
+  % sudo $self enable
+2011-07-20T15:39:56.941800330-05:00 $core_dir/core_mgr enable Created /etc/cron.d/core_mgr {
+MAILTO=root@localhost
+# m   h  dom mon dow user  command
+  1   1  *   *   *   root  $core_dir/core_mgr cleanup
+  */5 *  *   *   *   root  $core_dir/core_mgr check
+}
+2011-07-20T15:39:56.941800330-05:00 $core_dir/core_mgr enable core_pattern='|$core_dir/core_mgr X e=%e t=%t h=%h p=%p u=%u g=%g s=%s'
+
+  TEST:
+
+  % tail -f $core_dir/core_mgr.log &
+...
+  % bash -c 'kill -SIGSEGV \$\$'
+2011-07-20T15:47:44.953805211-05:00 $core_dir/core_mgr X e=bash t=1311194864 h=somehost p=26455 u=502 g=501 s=11 core_file=$core_dir/core-e=bash,t=1311194864,h=somehost,p=26455,u=502,g=501,s=11
+Segmentation fault (core dumped)
+  % gdb /usr/bin/bash $core_dir/core-e=bash,t=1311194864,h=somehost,p=26455,u=502,g=501,s=11
+...
+ 
+SETTINGS:
+
+  core_dir "$core_dir"
+
+  log_file "$log_file"
+
+  core_pattern "$core_pattern"
+
+  core_var_template "$core_var_template"
+
+  email_addr "$email_addr"
+
+EOF
+  ) | fmt
+}
+
+######################################################################
+
+action="$1"; shift
+case "$action"
+in
+  install|enable*|disable*|cleanup|check|list|clear|fake|test|ulimit|X|help)
+    "_$action" "$@" || errors=1
+  ;;
+  *)
+    echo "$self: bad action: $action" >&2;
+    exit 1
+  ;;
+esac
+
+exit $errors
+
